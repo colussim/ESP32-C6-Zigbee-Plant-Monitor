@@ -75,8 +75,8 @@ A custom 3D-printed case is provided to house the ESP32-C6, PCB, and all sensors
 ## 🗺️ Roadmap
 
 - [x] Soil moisture monitoring (main branch)
-- [ ] Soil temperature integration (upcoming branch)
-- [ ] Light exposure integration (upcoming branch)
+- [x] Soil temperature integration (upcoming branch)
+- [x] Light exposure integration (upcoming branch)
 - [ ] Improved Home Assistant dashboard
 
 ---
