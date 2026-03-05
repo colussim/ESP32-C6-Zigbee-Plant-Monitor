@@ -21,11 +21,16 @@ The components used in this project were mainly parts already available in my st
 ## 🛠️ Hardware
 
 > **Microcontroller:** Beetle ESP32-C6 Mini ([DFRobot DFR1117](https://wiki.dfrobot.com/dfr1117/))
->**Soil Moisture Sensor:** Capacitive Soil Moisture Sensor ([DFRobot SEN0308](https://wiki.dfrobot.com/sen0308/))
->**Temperature & Humidity Sensor:**  I2C Temperature & Humidity Sensor ([DFRobot SEN0546](https://wiki.dfrobot.com/sen0546/))
->**Light Sensor:** digital ambient light detection sensor ([M5Stack U136](https://docs.m5stack.com/en/unit/DLight%20Unit))
->**Custom PCB:** A small custom PCB for the ESP32-C6 and sensor connectors
->**Enclosure:** 3D-printed case designed to fit all components
+> 
+> **Soil Moisture Sensor:** Capacitive Soil Moisture Sensor ([DFRobot SEN0308](https://wiki.dfrobot.com/sen0308/))
+
+> **Temperature & Humidity Sensor:**  I2C Temperature & Humidity Sensor ([DFRobot SEN0546](https://wiki.dfrobot.com/sen0546/))
+
+> **Light Sensor:** digital ambient light detection sensor ([M5Stack U136](https://docs.m5stack.com/en/unit/DLight%20Unit))
+> 
+> **Custom PCB:** A small custom PCB for the ESP32-C6 and sensor connectors
+> 
+> **Enclosure:** 3D-printed case designed to fit all components
 
 ## ✨ Features
 
