@@ -21,11 +21,17 @@ The components used in this project were mainly parts already available in my st
 ## 🛠️ Hardware
 
 > **Microcontroller:** Beetle ESP32-C6 Mini ([DFRobot DFR1117](https://wiki.dfrobot.com/dfr1117/))
+>
 > **Soil Moisture Sensor:** Capacitive Soil Moisture Sensor ([DFRobot SEN0308](https://wiki.dfrobot.com/sen0308/))
+>
 > **Temperature & Humidity Sensor:**  I2C Temperature & Humidity Sensor ([DFRobot SEN0546](https://wiki.dfrobot.com/sen0546/))
+>
 > **Light Sensor:** digital ambient light detection sensor ([M5Stack U136](https://docs.m5stack.com/en/unit/DLight%20Unit))
+>
 > **Custom PCB:** A small custom PCB for the ESP32-C6 and sensor connectors
+>
 > **Enclosure:** 3D-printed case designed to fit all components
+>
 
 ## ✨ Features
 
@@ -73,7 +79,6 @@ A custom 3D-printed case is provided to house the ESP32-C6, PCB, and all sensors
 - [ ] Soil temperature integration (upcoming branch)
 - [ ] Light exposure integration (upcoming branch)
 - [ ] Improved Home Assistant dashboard
-- [ ] 
 
 ---
 
@@ -224,7 +229,7 @@ module.exports = {
     zigbeeModel: ['SoilSensor'], //ZigbeeModel
     model: 'SoilSensor',
     vendor: 'ECHOME',
-    description: 'Capteur humidité sol Zigbee DIY',
+    description: 'DIY Zigbee soil moisture sensor',
     fromZigbee: [fz.humidity, fz.battery],
     toZigbee: [],
     exposes: [
@@ -242,7 +247,7 @@ This file tells Zigbee2MQTT:
 	
 ⚙️ Add the converter to Zigbee2MQTT
 
-Open the Zigbee2MQTT configuration.yaml file and add the following entry:
+Open the Zigbee2MQTT *configuration.yaml* file and add the following entry:
 ```yaml
 external_converters:
   - external_converters/sleepyPlantSensor.js
