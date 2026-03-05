@@ -31,7 +31,6 @@ The components used in this project were mainly parts already available in my st
 > **Custom PCB:** A small custom PCB for the ESP32-C6 and sensor connectors
 >
 > **Enclosure:** 3D-printed case designed to fit all components
->
 
 ## ✨ Features
 
