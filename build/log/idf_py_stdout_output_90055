@@ -1,0 +1,25 @@
+[1/9] Performing build step for 'bootloader'
+[1/1] cd /Users/manu/Documents/App/sensor-plant-zigbee/build/bootloader/esp-idf/esptool_py && /Users/manu/.espressif/python_env/idf5.4_py3.14_env/bin/python /Users/manu/esp/esp-idf/components/partition_table/check_sizes.py --offset 0x8000 bootloader 0x0 /Users/manu/Documents/App/sensor-plant-zigbee/build/bootloader/bootloader.bin
+Bootloader binary size 0x55f0 bytes. 0x2a10 bytes (33%) free.
+[2/9] No install step for 'bootloader'
+[3/9] Completed 'bootloader'
+[4/9] Building C object esp-idf/main/CMakeFiles/__idf_main.dir/sensor-plant-zigbee.c.obj
+/Users/manu/Documents/App/sensor-plant-zigbee/main/sensor-plant-zigbee.c: In function 'zigbee_task':
+/Users/manu/Documents/App/sensor-plant-zigbee/main/sensor-plant-zigbee.c:267:9: warning: 'esp_zb_main_loop_iteration' is deprecated [-Wdeprecated-declarations]
+  267 |         esp_zb_main_loop_iteration();
+      |         ^~~~~~~~~~~~~~~~~~~~~~~~~~
+In file included from /Users/manu/Documents/App/sensor-plant-zigbee/main/sensor-plant-zigbee.c:16:
+/Users/manu/Documents/App/sensor-plant-zigbee/managed_components/espressif__esp-zigbee-lib/include/esp_zigbee_core.h:386:6: note: declared here
+  386 | void esp_zb_main_loop_iteration(void);
+      |      ^~~~~~~~~~~~~~~~~~~~~~~~~~
+[5/9] Linking C static library esp-idf/main/libmain.a
+[6/9] Generating ld/sections.ld
+[7/9] Linking CXX executable sensor-plant-zigbee.elf
+[8/9] Generating binary image from built executable
+esptool.py v4.11.0
+Creating esp32c6 image...
+Merged 2 ELF sections
+Successfully created esp32c6 image.
+Generated /Users/manu/Documents/App/sensor-plant-zigbee/build/sensor-plant-zigbee.bin
+[9/9] cd /Users/manu/Documents/App/sensor-plant-zigbee/build/esp-idf/esptool_py && /Users/manu/.espressif/python_env/idf5.4_py3.14_env/bin/python /Users/manu/esp/esp-idf/components/partition_table/check_sizes.py --offset 0x8000 partition --type app /Users/manu/Documents/App/sensor-plant-zigbee/build/partition_table/partition-table.bin /Users/manu/Documents/App/sensor-plant-zigbee/build/sensor-plant-zigbee.bin
+sensor-plant-zigbee.bin binary size 0x74630 bytes. Smallest app partition is 0x3da000 bytes. 0x3659d0 bytes (88%) free.
