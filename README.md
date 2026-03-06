@@ -1,4 +1,4 @@
-![ESP32](https://img.shields.io/badge/ESP32-Embedded-red) ![ESP-IDF](https://img.shields.io/badge/Framework-ESP--IDF-blue) ![Language](https://img.shields.io/badge/Language-C-informational) ![Zigbee](https://img.shields.io/badge/Protocol-Zigbee-orange) ![Quality Gate](http://localhost:9000/api/project_badges/measure?project=esp32c6-zigbee-plant-monitor&metric=alert_status)
+![ESP32](https://img.shields.io/badge/ESP32-Embedded-red) ![ESP-IDF](https://img.shields.io/badge/Framework-ESP--IDF-blue) ![Language](https://img.shields.io/badge/Language-C-informational) ![Zigbee](https://img.shields.io/badge/Protocol-Zigbee-orange) ![Quality Gate](imgs/badges/sonarqube-quality-gate.svg)
 
 # 🌱 ESP32-C6 Zigbee Plant Monitor
 
