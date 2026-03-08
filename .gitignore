@@ -1,2 +1,5 @@
 build
 scripts
+sonar-scan.sh
+sonar-project.properties
+
