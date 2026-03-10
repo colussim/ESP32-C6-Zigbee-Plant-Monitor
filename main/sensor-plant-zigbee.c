@@ -1,684 +1,287 @@
-#include "driver/i2c.h"
 #include <stdio.h>
 #include <string.h>
-#include <math.h>
-#include <stdbool.h>
-#include <stdint.h>
-
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-
 #include "esp_log.h"
 #include "esp_check.h"
-#include "esp_sleep.h"
 #include "nvs_flash.h"
-
+#include "driver/i2c_master.h"
 #include "esp_adc/adc_oneshot.h"
-#include "esp_adc/adc_cali.h"
-#include "esp_adc/adc_cali_scheme.h"
-
-// Zigbee
 #include "esp_zigbee_core.h"
-#include "esp_zigbee_attribute.h"
-#include "esp_zigbee_cluster.h"
-#include "platform/esp_zigbee_platform.h"
-#include "zcl/esp_zigbee_zcl_common.h"
-#include "zcl/esp_zigbee_zcl_basic.h"
-#include "zcl/esp_zigbee_zcl_humidity_meas.h"
-#include "zcl/esp_zigbee_zcl_power_config.h"
 
-#define I2C_MASTER_NUM              I2C_NUM_0
-#define I2C_MASTER_SCL_IO           8
-#define I2C_MASTER_SDA_IO           9
-#define I2C_MASTER_FREQ_HZ          100000
-#define I2C_MASTER_TX_BUF_DISABLE   0
-#define I2C_MASTER_RX_BUF_DISABLE   0
+/* --- CONFIG BEETLE C6 --- */
+#define I2C_SDA_PIN          GPIO_NUM_19
+#define I2C_SCL_PIN          GPIO_NUM_20
+#define SOIL_ADC_CHAN        ADC_CHANNEL_4 
+#define I2C_PORT             I2C_NUM_0
+#define ENDPOINT_ID          1
 
-#define SEN0546_ADDR                0x44
-#define U136_BH1750_ADDR            0x23
+static const char *TAG = "ZIGBEE_PLANT";
 
-#define ZCL_CLUSTER_ID_TEMP_MEASUREMENT 0x0402
-#define ZCL_CLUSTER_ID_ILLUMINANCE      0x0400
+static adc_oneshot_unit_handle_t adc1_handle;
+static i2c_master_dev_handle_t cht_handle;
+static i2c_master_dev_handle_t lux_handle;
 
-#define SENSOR_ENDPOINT           1
-#define SOIL_MOISTURE_ADC_CHAN    ADC_CHANNEL_4
-#define BATTERY_ADC_CHAN          ADC_CHANNEL_0
+static uint8_t s_bat_v_01V = 0;         // 0.1V units
+static uint8_t s_bat_pct_half = 0;      // 0.5% units
 
-#define DEEP_SLEEP_TIME_SEC       (120 * 60)
-#define PAIRING_GRACE_MS          (120 * 1000)
-#define AWAKE_AFTER_REPORT_MS     (3000)
-
-#define VBAT_DIVIDER_MULTIPLIER   (2.0f)
-#define VBAT_MV_GAIN              (1.0f)
-
-#define INSTALLCODE_POLICY_ENABLE false
-#define ED_AGING_TIMEOUT          ESP_ZB_ED_AGING_TIMEOUT_64MIN
-#define ED_KEEP_ALIVE_MS          3000
-
-#define ESP_ZB_PRIMARY_CHANNEL_MASK ESP_ZB_TRANSCEIVER_ALL_CHANNELS_MASK
-
-#define ESP_ZB_ZED_CONFIG()                 \
-{                                           \
-    .esp_zb_role = ESP_ZB_DEVICE_TYPE_ED,   \
-    .install_code_policy = INSTALLCODE_POLICY_ENABLE, \
-    .nwk_cfg = {                            \
-        .zed_cfg = {                        \
-            .ed_timeout = ED_AGING_TIMEOUT, \
-            .keep_alive = ED_KEEP_ALIVE_MS, \
-        },                                  \
-    },                                      \
+// --- Fonctions batterie ---
+static int read_battery_adc_raw(void) {
+    int raw = 0;
+    ESP_ERROR_CHECK(adc_oneshot_read(adc1_handle, ADC_CHANNEL_0, &raw)); // GPIO0
+    return raw;
 }
 
-#define ESP_ZB_DEFAULT_RADIO_CONFIG()       \
-{                                           \
-    .radio_mode = ZB_RADIO_MODE_NATIVE,     \
-}
-
-#define ESP_ZB_DEFAULT_HOST_CONFIG()        \
-{                                           \
-    .host_connection_mode = ZB_HOST_CONNECTION_MODE_NONE, \
-}
-
-#define SENSOR_POLL_MS                2000
-#define FIRST_SENSOR_POLL_DELAY_MS    2000
-
-static const char *TAG = "plant_zb";
-static volatile bool s_joined = false;
-static uint32_t s_join_time_ms = 0;
-static TaskHandle_t s_sensor_task_handle = NULL;
-
-// Zigbee attribute storage
-static uint16_t s_soil_humidity_001 = 0;   // keep old behavior: soil moisture published in humidity cluster
-static int16_t  s_temperature_01C = 0;     // 0.01 °C
-static uint16_t s_illuminance_lux = 0;     // lux
-static uint8_t  s_bat_v_01V = 0;           // 0.1 V
-static uint8_t  s_bat_pct_half = 0;        // 0.5 %
-
-// Log-only value for air humidity from SEN0546
-static uint16_t s_air_humidity_001 = 0;    // 0.01 %RH
-
-static int DRY_RAW = 3000;
-static int WET_RAW = 1200;
-
-// ADC state
-static adc_oneshot_unit_handle_t s_adc1 = NULL;
-static adc_cali_handle_t s_adc1_cali = NULL;
-static bool s_adc1_cali_inited = false;
-
-// Forward declarations
-static void i2c_master_init(void);
-static void adc_init_once(void);
-static int adc_read_avg(adc_channel_t ch, int samples, int delay_ms);
-static int adc_raw_to_mv(int raw);
-static uint16_t soil_pct_001_from_raw(int raw);
-static uint16_t read_soil_humidity_001(void);
-static int read_vbat_mv(void);
-static int lerp_pct_int(int x, int x0, int x1, int y0, int y1);
-static uint8_t lipo_pct_from_mv(int vbat_mv);
-
-static esp_err_t sen0546_read_temp_hum(int16_t *temp_01C, uint16_t *hum_001);
-static esp_err_t u136_read_lux(uint16_t *lux);
-static void read_environment_sensors(void);
-static void update_battery_values(int vbat_mv, uint8_t bat_pct);
-static void log_sensor_values(uint16_t soil_001, int vbat_mv, uint8_t bat_pct);
-static void update_zcl_attributes(uint16_t soil_001);
-
-static void bdb_start_top_level_commissioning_cb(uint8_t mode_mask);
-void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct);
-static void zigbee_register_endpoints(void);
-static void go_deep_sleep(void);
-static void go_deep_sleep_cb(uint8_t param);
-static void schedule_next_sensor_cycle(void);
-static void sensor_update_and_report_cb(uint8_t param);
-static void sensor_task(void *pv);
-static void zigbee_task(void *pv);
-
-// ----------------- I2C -----------------
-static void i2c_master_init(void)
-{
-    i2c_config_t conf = {
-        .mode = I2C_MODE_MASTER,
-        .sda_io_num = I2C_MASTER_SDA_IO,
-        .scl_io_num = I2C_MASTER_SCL_IO,
-        .sda_pullup_en = GPIO_PULLUP_ENABLE,
-        .scl_pullup_en = GPIO_PULLUP_ENABLE,
-        .master.clk_speed = I2C_MASTER_FREQ_HZ,
-        .clk_flags = 0,
-    };
-
-    ESP_ERROR_CHECK(i2c_param_config(I2C_MASTER_NUM, &conf));
-    ESP_ERROR_CHECK(i2c_driver_install(I2C_MASTER_NUM,
-                                       conf.mode,
-                                       I2C_MASTER_RX_BUF_DISABLE,
-                                       I2C_MASTER_TX_BUF_DISABLE,
-                                       0));
-}
-
-static esp_err_t sen0546_read_temp_hum(int16_t *temp_01C, uint16_t *hum_001)
-{
-    uint8_t data[6];
-    i2c_cmd_handle_t cmd;
-    esp_err_t ret;
-
-    // Start measurement: CHT832X command 0x24 0x00
-    cmd = i2c_cmd_link_create();
-    i2c_master_start(cmd);
-    i2c_master_write_byte(cmd, (SEN0546_ADDR << 1) | I2C_MASTER_WRITE, true);
-    i2c_master_write_byte(cmd, 0x24, true);
-    i2c_master_write_byte(cmd, 0x00, true);
-    i2c_master_stop(cmd);
-    ret = i2c_master_cmd_begin(I2C_MASTER_NUM, cmd, pdMS_TO_TICKS(20));
-    i2c_cmd_link_delete(cmd);
-    if (ret != ESP_OK) {
-        return ret;
-    }
-
-    vTaskDelay(pdMS_TO_TICKS(60));
-
-    cmd = i2c_cmd_link_create();
-    i2c_master_start(cmd);
-    i2c_master_write_byte(cmd, (SEN0546_ADDR << 1) | I2C_MASTER_READ, true);
-    i2c_master_read(cmd, data, sizeof(data), I2C_MASTER_LAST_NACK);
-    i2c_master_stop(cmd);
-    ret = i2c_master_cmd_begin(I2C_MASTER_NUM, cmd, pdMS_TO_TICKS(20));
-    i2c_cmd_link_delete(cmd);
-    if (ret != ESP_OK) {
-        return ret;
-    }
-
-    uint16_t temp_raw = ((uint16_t)data[0] << 8) | data[1];
-    uint16_t hum_raw  = ((uint16_t)data[3] << 8) | data[4];
-
-    *temp_01C = (int16_t)(-4500 + ((17500 * (int32_t)temp_raw) / 65535));
-    *hum_001  = (uint16_t)((10000 * (uint32_t)hum_raw) / 65535);
-    return ESP_OK;
-}
-
-static esp_err_t u136_read_lux(uint16_t *lux)
-{
-    uint8_t data[2];
-    i2c_cmd_handle_t cmd;
-    esp_err_t ret;
-
-    // Continuous H-Resolution Mode
-    cmd = i2c_cmd_link_create();
-    i2c_master_start(cmd);
-    i2c_master_write_byte(cmd, (U136_BH1750_ADDR << 1) | I2C_MASTER_WRITE, true);
-    i2c_master_write_byte(cmd, 0x10, true);
-    i2c_master_stop(cmd);
-    ret = i2c_master_cmd_begin(I2C_MASTER_NUM, cmd, pdMS_TO_TICKS(20));
-    i2c_cmd_link_delete(cmd);
-    if (ret != ESP_OK) {
-        return ret;
-    }
-
-    vTaskDelay(pdMS_TO_TICKS(180));
-
-    cmd = i2c_cmd_link_create();
-    i2c_master_start(cmd);
-    i2c_master_write_byte(cmd, (U136_BH1750_ADDR << 1) | I2C_MASTER_READ, true);
-    i2c_master_read(cmd, data, sizeof(data), I2C_MASTER_LAST_NACK);
-    i2c_master_stop(cmd);
-    ret = i2c_master_cmd_begin(I2C_MASTER_NUM, cmd, pdMS_TO_TICKS(20));
-    i2c_cmd_link_delete(cmd);
-    if (ret != ESP_OK) {
-        return ret;
-    }
-
-    uint16_t raw = ((uint16_t)data[0] << 8) | data[1];
-    *lux = (uint16_t)(raw / 1.2f);
-    return ESP_OK;
-}
-
-// ----------------- ADC -----------------
-static void adc_cali_init_once(adc_unit_t unit, adc_channel_t channel, adc_atten_t atten, adc_bitwidth_t bitwidth)
-{
-#if ADC_CALI_SCHEME_CURVE_FITTING_SUPPORTED
-    adc_cali_curve_fitting_config_t cali_cfg = {
-        .unit_id = unit,
-        .chan = channel,
-        .atten = atten,
-        .bitwidth = bitwidth,
-    };
-    if (adc_cali_create_scheme_curve_fitting(&cali_cfg, &s_adc1_cali) == ESP_OK) {
-        s_adc1_cali_inited = true;
-        ESP_LOGI(TAG, "ADC cali: curve fitting enabled");
-        return;
-    }
-#endif
-
-#if ADC_CALI_SCHEME_LINE_FITTING_SUPPORTED
-    adc_cali_line_fitting_config_t cali_cfg = {
-        .unit_id = unit,
-        .atten = atten,
-        .bitwidth = bitwidth,
-    };
-    if (adc_cali_create_scheme_line_fitting(&cali_cfg, &s_adc1_cali) == ESP_OK) {
-        s_adc1_cali_inited = true;
-        ESP_LOGI(TAG, "ADC cali: line fitting enabled");
-        return;
-    }
-#endif
-
-    ESP_LOGW(TAG, "ADC cali not available (using raw->mv approximation)");
-}
-
-static int adc_raw_to_mv(int raw)
-{
-    if (s_adc1_cali_inited && s_adc1_cali != NULL) {
-        int mv = 0;
-        if (adc_cali_raw_to_voltage(s_adc1_cali, raw, &mv) == ESP_OK) {
-            return mv;
-        }
-    }
+static int adc_raw_to_mv(int raw) {
+    // Approximation non calibrée
     return (raw * 3300) / 4095;
 }
 
-static void adc_init_once(void)
-{
-    if (s_adc1 != NULL) {
-        return;
-    }
-
-    adc_oneshot_unit_init_cfg_t init_cfg = {
-        .unit_id = ADC_UNIT_1,
-    };
-    ESP_ERROR_CHECK(adc_oneshot_new_unit(&init_cfg, &s_adc1));
-
-    adc_oneshot_chan_cfg_t chan_cfg = {
-        .bitwidth = ADC_BITWIDTH_DEFAULT,
-        .atten = ADC_ATTEN_DB_12,
-    };
-
-    ESP_ERROR_CHECK(adc_oneshot_config_channel(s_adc1, SOIL_MOISTURE_ADC_CHAN, &chan_cfg));
-    ESP_ERROR_CHECK(adc_oneshot_config_channel(s_adc1, BATTERY_ADC_CHAN, &chan_cfg));
-
-    adc_cali_init_once(ADC_UNIT_1, BATTERY_ADC_CHAN, chan_cfg.atten, chan_cfg.bitwidth);
-}
-
-static int adc_read_avg(adc_channel_t ch, int samples, int delay_ms)
-{
-    int acc = 0;
-    for (int i = 0; i < samples; i++) {
-        int raw = 0;
-        ESP_ERROR_CHECK(adc_oneshot_read(s_adc1, ch, &raw));
-        acc += raw;
-        if (delay_ms > 0) {
-            vTaskDelay(pdMS_TO_TICKS(delay_ms));
-        }
-    }
-    return acc / samples;
-}
-
-static uint16_t soil_pct_001_from_raw(int raw)
-{
-    float pct = 0.0f;
-
-    if (DRY_RAW == WET_RAW) {
-        pct = 0.0f;
-    } else if (DRY_RAW > WET_RAW) {
-        pct = ((float)(DRY_RAW - raw) * 100.0f) / (float)(DRY_RAW - WET_RAW);
-    } else {
-        pct = ((float)(raw - DRY_RAW) * 100.0f) / (float)(WET_RAW - DRY_RAW);
-    }
-
-    if (pct < 0.0f) pct = 0.0f;
-    if (pct > 100.0f) pct = 100.0f;
-
-    return (uint16_t)lroundf(pct * 100.0f);
-}
-
-static uint16_t read_soil_humidity_001(void)
-{
-    int raw = adc_read_avg(SOIL_MOISTURE_ADC_CHAN, 32, 2);
-    return soil_pct_001_from_raw(raw);
-}
-
-static int read_vbat_mv(void)
-{
-    int raw = adc_read_avg(BATTERY_ADC_CHAN, 16, 2);
+static int get_battery_mv(void) {
+    int raw = read_battery_adc_raw();
     int mv_adc = adc_raw_to_mv(raw);
-    int vbat_mv = (int)lroundf((float)mv_adc * VBAT_DIVIDER_MULTIPLIER * VBAT_MV_GAIN);
+    // Si diviseur de tension, adapter ici
+    int vbat_mv = (int)((float)mv_adc * 2.0f); // Multiplie par 2 si diviseur VBAT/2
     ESP_LOGI(TAG, "BAT: raw=%d mv_adc=%d -> vbat=%dmV", raw, mv_adc, vbat_mv);
     return vbat_mv;
 }
 
-static int lerp_pct_int(int x, int x0, int x1, int y0, int y1)
-{
-    if (x <= x0) return y0;
-    if (x >= x1) return y1;
-    return y0 + (int)(((int64_t)(x - x0) * (y1 - y0)) / (x1 - x0));
-}
-
-static uint8_t lipo_pct_from_mv(int vbat_mv)
-{
+static uint8_t lipo_pct_from_mv(int vbat_mv) {
     if (vbat_mv <= 3400) return 0;
     if (vbat_mv >= 4200) return 100;
-
     int pct;
-    if (vbat_mv < 3700) {
-        pct = lerp_pct_int(vbat_mv, 3400, 3700, 0, 65);
-    } else if (vbat_mv < 3900) {
-        pct = lerp_pct_int(vbat_mv, 3700, 3900, 65, 80);
-    } else if (vbat_mv < 4100) {
-        pct = lerp_pct_int(vbat_mv, 3900, 4100, 80, 92);
-    } else {
-        pct = lerp_pct_int(vbat_mv, 4100, 4200, 92, 100);
-    }
-
+    if (vbat_mv < 3700) pct = (vbat_mv - 3400) * 65 / 300;
+    else if (vbat_mv < 3900) pct = 65 + (vbat_mv - 3700) * 15 / 200;
+    else if (vbat_mv < 4100) pct = 80 + (vbat_mv - 3900) * 12 / 200;
+    else pct = 92 + (vbat_mv - 4100) * 8 / 100;
     if (pct < 0) pct = 0;
     if (pct > 100) pct = 100;
     return (uint8_t)pct;
 }
 
-// ----------------- Zigbee app signal -----------------
-static void bdb_start_top_level_commissioning_cb(uint8_t mode_mask)
-{
-    ESP_ERROR_CHECK(esp_zb_bdb_start_top_level_commissioning(mode_mask));
+/* --- LECTURE CAPTEURS --- */
+/* --- LECTURE CAPTEURS (CORRIGÉE) --- */
+static void read_sensors(int16_t *t, uint16_t *l, uint16_t *s) {
+    uint8_t data_rx[6] = {0}; // Augmenté pour le buffer complet
+    uint8_t cmd_meas_temp[] = {0x24, 0x00}; // Commande de mesure pour CHT832X
+    uint8_t cmd_power_on = 0x01;
+    uint8_t cmd_measure_lux = 0x10;
+
+    // --- SECTION LUX (BH1750) ---
+    i2c_master_transmit(lux_handle, &cmd_power_on, 1, -1);
+    vTaskDelay(pdMS_TO_TICKS(10));
+    i2c_master_transmit(lux_handle, &cmd_measure_lux, 1, -1);
+    vTaskDelay(pdMS_TO_TICKS(200)); 
+
+    if (i2c_master_receive(lux_handle, data_rx, 2, -1) == ESP_OK) {
+        uint16_t raw_lux = (data_rx[0] << 8) | data_rx[1];
+        *l = (uint16_t)(raw_lux / 1.2);
+    } else {
+        ESP_LOGW(TAG, "NACK Lux");
+        *l = 0;
+    }
+
+    // --- SECTION TEMP (SEN0546 / CHT832X) ---
+    // 1. Envoyer commande de mesure
+    i2c_master_transmit(cht_handle, cmd_meas_temp, 2, -1);
+    vTaskDelay(pdMS_TO_TICKS(50)); // Attendre la conversion
+
+    // 2. Lire les 6 octets (Temp MSB, Temp LSB, CRC, Hum MSB, Hum LSB, CRC)
+    if (i2c_master_receive(cht_handle, data_rx, 6, -1) == ESP_OK) {
+        uint16_t raw_temp = (data_rx[0] << 8) | data_rx[1];
+        // Formule correcte SEN0546 : T = -45 + 175 * (raw / 65535)
+        float temp_c = -45.0 + 175.0 * ((float)raw_temp / 65535.0);
+        *t = (int16_t)(temp_c * 100); // Zigbee 0.01°C
+    } else {
+        ESP_LOGW(TAG, "NACK Temp");
+        *t = -4000; // Valeur par défaut erreur
+    }
+
+    // --- SECTION ADC (SEN0308) ---
+   /* int adc_raw = 0;
+    if (adc_oneshot_read(adc1_handle, SOIL_ADC_CHAN, &adc_raw) == ESP_OK) {
+        // Calibration basée sur tes logs (1120 en l'air)
+        int val_air = 1120;   
+        int val_eau = 500;   // À ajuster en trempant dans l'eau
+        int perc = (val_air - adc_raw) * 10000 / (val_air - val_eau);
+        if (perc < 0) perc = 0;
+        if (perc > 10000) perc = 10000;
+        *s = (uint16_t)perc;
+    }*/
+
+   int adc_raw = 0;
+if (adc_oneshot_read(adc1_handle, SOIL_ADC_CHAN, &adc_raw) == ESP_OK) {
+    // Calibration SEN0546 :
+    // Mesure dans l'air (val_air) et dans l'eau (val_eau) pour obtenir les valeurs réelles
+    int val_air = 2944;   // Mesure réelle en l'air
+    int val_eau = 256;    // Mesure réelle dans l'eau
+
+    // Formule : 0% = eau, 100% = air
+    float ratio = (float)(adc_raw - val_eau) / (float)(val_air - val_eau);
+    int perc = (int)(ratio * 10000);
+    if (perc < 0) perc = 0;
+    if (perc > 10000) perc = 10000;
+    *s = (uint16_t)perc;
+
+    ESP_LOGI(TAG, "SOL RAW: %d | PERC: %.2f%%", adc_raw, (float)perc/100.0);
+    // Pour calibrer :
+    // 1. Place la sonde dans l'air, note adc_raw => val_air
+    // 2. Place la sonde dans l'eau, note adc_raw => val_eau
+    // 3. Mets à jour les valeurs ci-dessus
 }
 
-void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
-{
+}
+
+
+/* --- ZIGBEE CALLBACKS --- */
+void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct) {
     uint32_t *p_sg_p = signal_struct->p_app_signal;
-    esp_err_t status = signal_struct->esp_err_status;
-    esp_zb_app_signal_type_t sig = (esp_zb_app_signal_type_t)*p_sg_p;
-
-    switch (sig) {
-    case ESP_ZB_ZDO_SIGNAL_SKIP_STARTUP:
-        ESP_LOGI(TAG, "Zigbee stack initialized");
-        esp_zb_bdb_start_top_level_commissioning(ESP_ZB_BDB_MODE_INITIALIZATION);
-        break;
-
-    case ESP_ZB_BDB_SIGNAL_DEVICE_FIRST_START:
-    case ESP_ZB_BDB_SIGNAL_DEVICE_REBOOT:
-        if (status == ESP_OK) {
-            ESP_LOGI(TAG, "Start network steering");
-            esp_zb_bdb_start_top_level_commissioning(ESP_ZB_BDB_MODE_NETWORK_STEERING);
-        } else {
-            ESP_LOGW(TAG, "Failed to init Zigbee (status: %s)", esp_err_to_name(status));
-        }
-        break;
-
-    case ESP_ZB_BDB_SIGNAL_STEERING:
-        if (status == ESP_OK) {
-            ESP_LOGI(TAG, "Joined network successfully");
-            s_joined = true;
-            s_join_time_ms = (uint32_t)esp_log_timestamp();
-            esp_zb_scheduler_alarm(sensor_update_and_report_cb, 0, FIRST_SENSOR_POLL_DELAY_MS);
-        } else {
-            ESP_LOGW(TAG, "Network steering failed (status: %s), retry...", esp_err_to_name(status));
-            esp_zb_scheduler_alarm(bdb_start_top_level_commissioning_cb,
-                                   ESP_ZB_BDB_MODE_NETWORK_STEERING,
-                                   1000);
-        }
-        break;
-
-    default:
-        ESP_LOGI(TAG, "ZDO signal: %s (0x%x), status: %s",
-                 esp_zb_zdo_signal_to_string(sig), sig, esp_err_to_name(status));
-        break;
+    esp_zb_app_signal_type_t sig_type = *p_sg_p;
+    ESP_LOGI(TAG, "Zigbee signal handler: type=0x%x", (unsigned int)sig_type);
+    if (sig_type == ESP_ZB_ZDO_SIGNAL_SKIP_STARTUP) {
+        ESP_LOGI(TAG, "Zigbee: SKIP_STARTUP, lancement du commissioning (network steering)");
+        esp_zb_bdb_start_top_level_commissioning(ESP_ZB_BDB_MODE_NETWORK_STEERING);
+    } else {
+        ESP_LOGI(TAG, "Zigbee: autre signal 0x%x", (unsigned int)sig_type);
     }
 }
 
-// ----------------- Zigbee endpoints -----------------
-static void zigbee_register_endpoints(void)
-{
-    esp_zb_cluster_list_t *cl = esp_zb_zcl_cluster_list_create();
+/* --- MAIN TASK --- */
+static void zigbee_task_runner(void *pvParameters) {
+    // 1. Initialisation Configuration
+    esp_zb_cfg_t zb_nwk_cfg = {
+        .esp_zb_role = ESP_ZB_DEVICE_TYPE_ED,
+        .install_code_policy = false,
+        .nwk_cfg.zed_cfg = {
+            .ed_timeout = ESP_ZB_ED_AGING_TIMEOUT_64MIN,
+            .keep_alive = 3000,
+        },
+    };
+    esp_zb_init(&zb_nwk_cfg);
 
+    // 2. Clusters
+    esp_zb_cluster_list_t *cluster_list = esp_zb_zcl_cluster_list_create();
+
+    // Cluster Basic
     esp_zb_basic_cluster_cfg_t basic_cfg = {0};
     basic_cfg.zcl_version = ESP_ZB_ZCL_BASIC_ZCL_VERSION_DEFAULT_VALUE;
     basic_cfg.power_source = ESP_ZB_ZCL_BASIC_POWER_SOURCE_BATTERY;
     esp_zb_attribute_list_t *basic = esp_zb_basic_cluster_create(&basic_cfg);
     esp_zb_basic_cluster_add_attr(basic, ESP_ZB_ZCL_ATTR_BASIC_MANUFACTURER_NAME_ID, "ECHOME");
     esp_zb_basic_cluster_add_attr(basic, ESP_ZB_ZCL_ATTR_BASIC_MODEL_IDENTIFIER_ID, "SoilBeetleC6");
-    esp_zb_cluster_list_add_basic_cluster(cl, basic, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
+    esp_zb_cluster_list_add_basic_cluster(cluster_list, basic, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
 
-    // Keep humidity cluster mapped to soil moisture for backward compatibility
-    esp_zb_humidity_meas_cluster_cfg_t hum_cfg = {
-        .measured_value = ESP_ZB_ZCL_REL_HUMIDITY_MEASUREMENT_MEASURED_VALUE_DEFAULT,
-        .min_value = ESP_ZB_ZCL_REL_HUMIDITY_MEASUREMENT_MIN_MEASURED_VALUE_MINIMUM,
-        .max_value = ESP_ZB_ZCL_REL_HUMIDITY_MEASUREMENT_MAX_MEASURED_VALUE_MAXIMUM,
-    };
-    esp_zb_attribute_list_t *hum = esp_zb_humidity_meas_cluster_create(&hum_cfg);
-    ESP_ERROR_CHECK(esp_zb_cluster_update_attr(hum,
-                    ESP_ZB_ZCL_ATTR_REL_HUMIDITY_MEASUREMENT_VALUE_ID,
-                    &s_soil_humidity_001));
-    esp_zb_cluster_list_add_humidity_meas_cluster(cl, hum, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
-
-    esp_zb_temperature_meas_cluster_cfg_t temp_cfg = {
-        .measured_value = ESP_ZB_ZCL_TEMP_MEASUREMENT_MEASURED_VALUE_DEFAULT,
-        .min_value = ESP_ZB_ZCL_TEMP_MEASUREMENT_MIN_MEASURED_VALUE_MINIMUM,
-        .max_value = ESP_ZB_ZCL_TEMP_MEASUREMENT_MAX_MEASURED_VALUE_MAXIMUM,
-    };
-    esp_zb_attribute_list_t *temp = esp_zb_temperature_meas_cluster_create(&temp_cfg);
-    ESP_ERROR_CHECK(esp_zb_cluster_update_attr(temp,
-                    ESP_ZB_ZCL_ATTR_TEMP_MEASUREMENT_VALUE_ID,
-                    &s_temperature_01C));
-    esp_zb_cluster_list_add_temperature_meas_cluster(cl, temp, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
-
-    esp_zb_illuminance_meas_cluster_cfg_t illu_cfg = {
-        .measured_value = ESP_ZB_ZCL_ATTR_ILLUMINANCE_MEASUREMENT_MEASURED_VALUE_DEFAULT,
-        .min_value = ESP_ZB_ZCL_ATTR_ILLUMINANCE_MEASUREMENT_MIN_MEASURED_VALUE_MIN_VALUE,
-        .max_value = ESP_ZB_ZCL_ATTR_ILLUMINANCE_MEASUREMENT_MAX_MEASURED_VALUE_MAX_VALUE,
-    };
-    esp_zb_attribute_list_t *illu = esp_zb_illuminance_meas_cluster_create(&illu_cfg);
-    ESP_ERROR_CHECK(esp_zb_cluster_update_attr(illu,
-                    ESP_ZB_ZCL_ATTR_ILLUMINANCE_MEASUREMENT_MEASURED_VALUE_ID,
-                    &s_illuminance_lux));
-    esp_zb_cluster_list_add_illuminance_meas_cluster(cl, illu, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
-
+    // Cluster Power Configuration
     esp_zb_attribute_list_t *pwr = esp_zb_zcl_attr_list_create(ESP_ZB_ZCL_CLUSTER_ID_POWER_CONFIG);
     esp_zb_power_config_cluster_add_attr(pwr, 0x0020, &s_bat_v_01V);
     esp_zb_power_config_cluster_add_attr(pwr, 0x0021, &s_bat_pct_half);
-    esp_zb_cluster_list_add_power_config_cluster(cl, pwr, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
+    esp_zb_cluster_list_add_power_config_cluster(cluster_list, pwr, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
 
-    esp_zb_ep_list_t *ep_list = esp_zb_ep_list_create();
-    esp_zb_endpoint_config_t ep_cfg = {
-        .endpoint = SENSOR_ENDPOINT,
+    // Cluster Temperature
+    esp_zb_temperature_meas_cluster_cfg_t t_cfg = {.measured_value = 0, .min_value = -4000, .max_value = 12500};
+    esp_zb_cluster_list_add_temperature_meas_cluster(cluster_list, esp_zb_temperature_meas_cluster_create(&t_cfg), ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
+    
+    // Cluster Illuminance
+    esp_zb_illuminance_meas_cluster_cfg_t l_cfg = {.measured_value = 0, .min_value = 0, .max_value = 0xFFFF};
+    esp_zb_cluster_list_add_illuminance_meas_cluster(cluster_list, esp_zb_illuminance_meas_cluster_create(&l_cfg), ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
+
+    // Cluster Humidity
+    esp_zb_humidity_meas_cluster_cfg_t s_cfg = {.measured_value = 0, .min_value = 0, .max_value = 10000};
+    esp_zb_cluster_list_add_humidity_meas_cluster(cluster_list, esp_zb_humidity_meas_cluster_create(&s_cfg), ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
+
+    // 3. Endpoint
+    esp_zb_endpoint_config_t ep_config = {
+        .endpoint = ENDPOINT_ID,
         .app_profile_id = ESP_ZB_AF_HA_PROFILE_ID,
-        .app_device_id = ESP_ZB_HA_SIMPLE_SENSOR_DEVICE_ID,
-        .app_device_version = 0,
+        .app_device_id = ESP_ZB_HA_TEMPERATURE_SENSOR_DEVICE_ID,
+        .app_device_version = 0
     };
+    esp_zb_ep_list_t *ep_list = esp_zb_ep_list_create();
+    esp_zb_ep_list_add_ep(ep_list, cluster_list, ep_config);
 
-    ESP_ERROR_CHECK(esp_zb_ep_list_add_ep(ep_list, cl, ep_cfg));
-    ESP_ERROR_CHECK(esp_zb_device_register(ep_list));
-}
-
-// ----------------- Runtime helpers -----------------
-static void go_deep_sleep(void)
-{
-    ESP_LOGI(TAG, "Deep sleep %d sec", DEEP_SLEEP_TIME_SEC);
-    ESP_ERROR_CHECK(esp_sleep_enable_timer_wakeup((uint64_t)DEEP_SLEEP_TIME_SEC * 1000000ULL));
-    vTaskDelay(pdMS_TO_TICKS(100));
-    esp_deep_sleep_start();
-}
-
-static void go_deep_sleep_cb(uint8_t param)
-{
-    (void)param;
-    go_deep_sleep();
-}
-
-static void schedule_next_sensor_cycle(void)
-{
-    uint32_t now = (uint32_t)esp_log_timestamp();
-    if (now - s_join_time_ms < PAIRING_GRACE_MS) {
-        esp_zb_scheduler_alarm(sensor_update_and_report_cb, 0, SENSOR_POLL_MS);
-    } else {
-        esp_zb_scheduler_alarm(go_deep_sleep_cb, 0, AWAKE_AFTER_REPORT_MS);
-    }
-}
-
-static void read_environment_sensors(void)
-{
-    esp_err_t ret = sen0546_read_temp_hum(&s_temperature_01C, &s_air_humidity_001);
-    if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "SEN0546 read failed: %s", esp_err_to_name(ret));
-    }
-
- /* ret = u136_read_lux(&s_illuminance_lux);
-    if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "U136 read failed: %s", esp_err_to_name(ret));
-    }*/
-}
-
-static void update_battery_values(int vbat_mv, uint8_t bat_pct)
-{
-    s_bat_v_01V = (uint8_t)((vbat_mv + 50) / 100);
-    s_bat_pct_half = (uint8_t)(bat_pct * 2);
-}
-
-static void log_sensor_values(uint16_t soil_001, int vbat_mv, uint8_t bat_pct)
-{
-    ESP_LOGI(TAG,
-             "Mesures: soil=%.2f%% airHum=%.2f%% temp=%.2f°C lux=%u VBAT=%dmV (%u%%)",
-             soil_001 / 100.0f,
-             s_air_humidity_001 / 100.0f,
-             s_temperature_01C / 100.0f,
-             s_illuminance_lux,
-             vbat_mv,
-             bat_pct);
-}
-
-static void update_zcl_attributes(uint16_t soil_001)
-{
-    s_soil_humidity_001 = soil_001;
-
-    esp_zb_zcl_set_attribute_val(SENSOR_ENDPOINT,
-                                 ESP_ZB_ZCL_CLUSTER_ID_REL_HUMIDITY_MEASUREMENT,
-                                 ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
-                                 ESP_ZB_ZCL_ATTR_REL_HUMIDITY_MEASUREMENT_VALUE_ID,
-                                 &s_soil_humidity_001,
-                                 false);
-
-    esp_zb_zcl_set_attribute_val(SENSOR_ENDPOINT,
-                                 ZCL_CLUSTER_ID_TEMP_MEASUREMENT,
-                                 ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
-                                 0x0000,
-                                 &s_temperature_01C,
-                                 false);
-
-    esp_zb_zcl_set_attribute_val(SENSOR_ENDPOINT,
-                                 ZCL_CLUSTER_ID_ILLUMINANCE,
-                                 ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
-                                 0x0000,
-                                 &s_illuminance_lux,
-                                 false);
-
-    esp_zb_zcl_set_attribute_val(SENSOR_ENDPOINT,
-                                 ESP_ZB_ZCL_CLUSTER_ID_POWER_CONFIG,
-                                 ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
-                                 0x0020,
-                                 &s_bat_v_01V,
-                                 false);
-
-    esp_zb_zcl_set_attribute_val(SENSOR_ENDPOINT,
-                                 ESP_ZB_ZCL_CLUSTER_ID_POWER_CONFIG,
-                                 ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
-                                 0x0021,
-                                 &s_bat_pct_half,
-                                 false);
-}
-
-// ----------------- Tasks and callbacks -----------------
-static void sensor_update_and_report_cb(uint8_t param)
-{
-    (void)param;
-
-    if (!s_joined) {
-        schedule_next_sensor_cycle();
-        return;
-    }
-
-    if (s_sensor_task_handle != NULL) {
-        xTaskNotifyGive(s_sensor_task_handle);
-    } else {
-        schedule_next_sensor_cycle();
-    }
-}
-
-static void sensor_task(void *pv)
-{
-    (void)pv;
-
-    while (1) {
-        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-
-        if (!s_joined) {
-            continue;
-        }
-
-        uint16_t soil = read_soil_humidity_001();
-        int vbat_mv = read_vbat_mv();
-        uint8_t bat_pct = lipo_pct_from_mv(vbat_mv);
-
-        read_environment_sensors();
-        update_battery_values(vbat_mv, bat_pct);
-        log_sensor_values(soil, vbat_mv, bat_pct);
-
-        esp_zb_lock_acquire(portMAX_DELAY);
-        update_zcl_attributes(soil);
-        schedule_next_sensor_cycle();
-        esp_zb_lock_release();
-    }
-}
-
-static void zigbee_task(void *pv)
-{
-    (void)pv;
-
-    ESP_LOGI(TAG, "zigbee_task started");
-
-    adc_init_once();
-
-    esp_zb_cfg_t zb_cfg = ESP_ZB_ZED_CONFIG();
-    esp_zb_init(&zb_cfg);
-
-    zigbee_register_endpoints();
-    esp_zb_set_primary_network_channel_set(ESP_ZB_PRIMARY_CHANNEL_MASK);
+    esp_zb_device_register(ep_list);
+    //esp_zb_set_primary_network_channel_set(0x07FFF800);
+    esp_zb_set_primary_network_channel_set(ESP_ZB_TRANSCEIVER_ALL_CHANNELS_MASK);
 
     ESP_ERROR_CHECK(esp_zb_start(false));
+    ESP_LOGI(TAG, "Zigbee stack démarrée, attente des signaux...");
+  //  vTaskDelay(pdMS_TO_TICKS(60000));
 
-    while (1) {
-        esp_zb_stack_main_loop_iteration();
+    while(1) {
+        int16_t t=0; uint16_t l=0, s=0;
+        read_sensors(&t, &l, &s);
+        esp_zb_lock_acquire(portMAX_DELAY);
+        esp_zb_zcl_set_attribute_val(ENDPOINT_ID, ESP_ZB_ZCL_CLUSTER_ID_TEMP_MEASUREMENT, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE, ESP_ZB_ZCL_ATTR_TEMP_MEASUREMENT_VALUE_ID, &t, false);
+        esp_zb_zcl_set_attribute_val(ENDPOINT_ID, ESP_ZB_ZCL_CLUSTER_ID_ILLUMINANCE_MEASUREMENT, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE, ESP_ZB_ZCL_ATTR_ILLUMINANCE_MEASUREMENT_MEASURED_VALUE_ID, &l, false);
+        esp_zb_zcl_set_attribute_val(ENDPOINT_ID, ESP_ZB_ZCL_CLUSTER_ID_REL_HUMIDITY_MEASUREMENT, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE, ESP_ZB_ZCL_ATTR_REL_HUMIDITY_MEASUREMENT_VALUE_ID, &s, false);
+        // --- Mise à jour des attributs batterie ---
+        int vbat_mv = get_battery_mv();
+        s_bat_v_01V = (uint8_t)((vbat_mv + 50) / 100); // 0.1V
+        s_bat_pct_half = (uint8_t)(lipo_pct_from_mv(vbat_mv) * 2); // 0.5%
+        esp_zb_zcl_set_attribute_val(ENDPOINT_ID, ESP_ZB_ZCL_CLUSTER_ID_POWER_CONFIG, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE, 0x0020, &s_bat_v_01V, false);
+        esp_zb_zcl_set_attribute_val(ENDPOINT_ID, ESP_ZB_ZCL_CLUSTER_ID_POWER_CONFIG, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE, 0x0021, &s_bat_pct_half, false);
+        esp_zb_lock_release();
+        ESP_LOGI(TAG, "Update -> T:%.2f L:%u S:%.2f", (float)t/100, l, (float)s/100);
+        vTaskDelay(pdMS_TO_TICKS(30000));
     }
 }
 
-void app_main(void)
-{
+void app_main(void) {
     ESP_ERROR_CHECK(nvs_flash_init());
-
-    esp_zb_platform_config_t platform_cfg = {
-        .radio_config = ESP_ZB_DEFAULT_RADIO_CONFIG(),
-        .host_config = ESP_ZB_DEFAULT_HOST_CONFIG(),
+    
+    // I2C Initialisation du Bus
+    i2c_master_bus_handle_t bus_h;
+    i2c_master_bus_config_t b_cfg = {
+        .clk_source = I2C_CLK_SRC_DEFAULT, 
+        .i2c_port = I2C_PORT, 
+        .scl_io_num = I2C_SCL_PIN, 
+        .sda_io_num = I2C_SDA_PIN, 
+        .glitch_ignore_cnt = 7, 
+        .flags.enable_internal_pullup = true
+        
     };
-    ESP_ERROR_CHECK(esp_zb_platform_config(&platform_cfg));
 
-    i2c_master_init();
+    ESP_ERROR_CHECK(i2c_new_master_bus(&b_cfg, &bus_h));
+    vTaskDelay(pdMS_TO_TICKS(100)); 
+    
+    // Configuration commune pour les périphériques
+    // AJOUT DE scl_speed_hz ICI pour corriger le crash
+    i2c_device_config_t d_cfg = {
+        .dev_addr_length = I2C_ADDR_BIT_LEN_7, 
+        .device_address = 0x44,        // CHT832X
+        .scl_speed_hz = 100000,        // 100 kHz (standard)
+    };
+    ESP_ERROR_CHECK(i2c_master_bus_add_device(bus_h, &d_cfg, &cht_handle));
 
-    BaseType_t sensor_task_result = xTaskCreate(sensor_task,
-                                                "sensor_task",
-                                                4096,
-                                                NULL,
-                                                4,
-                                                &s_sensor_task_handle);
-    if (sensor_task_result == pdPASS) {
-        ESP_LOGI(TAG, "sensor_task started");
-    } else {
-        ESP_LOGE(TAG, "sensor_task not started (xTaskCreate=%d)", sensor_task_result);
-    }
+    
 
-    BaseType_t zigbee_task_result = xTaskCreate(zigbee_task,
-                                                "zigbee",
-                                                8192,
-                                                NULL,
-                                                5,
-                                                NULL);
-    if (zigbee_task_result == pdPASS) {
-        ESP_LOGI(TAG, "zigbee_task created");
-    } else {
-        ESP_LOGE(TAG, "zigbee_task not started (xTaskCreate=%d)", zigbee_task_result);
-    }
+    // Mise à jour de l'adresse pour le deuxième capteur (M5-DLight)
+    d_cfg.device_address = 0x23;
+    ESP_ERROR_CHECK(i2c_master_bus_add_device(bus_h, &d_cfg, &lux_handle));
 
-    vTaskDelete(NULL);
+    // ADC Initialisation (SEN0308)
+   /* adc_oneshot_unit_init_cfg_t a_init = {.unit_id = ADC_UNIT_1};
+    ESP_ERROR_CHECK(adc_oneshot_new_unit(&a_init, &adc1_handle));
+    adc_oneshot_chan_cfg_t a_ch = {.bitwidth = ADC_BITWIDTH_DEFAULT, .atten = ADC_ATTEN_DB_12};
+    ESP_ERROR_CHECK(adc_oneshot_config_channel(adc1_handle, SOIL_ADC_CHAN, &a_ch));*/
+
+    adc_oneshot_unit_init_cfg_t a_init = {.unit_id = ADC_UNIT_1};
+ESP_ERROR_CHECK(adc_oneshot_new_unit(&a_init, &adc1_handle));
+
+// Correction : utiliser ADC_ATTEN_DB_12 pour lire toute la plage 0-3.3V
+adc_oneshot_chan_cfg_t a_ch = {.bitwidth = ADC_BITWIDTH_DEFAULT, .atten = ADC_ATTEN_DB_12}; 
+ESP_ERROR_CHECK(adc_oneshot_config_channel(adc1_handle, SOIL_ADC_CHAN, &a_ch));
+
+
+    // Configuration Radio Zigbee
+    esp_zb_platform_config_t p_config = {
+        .radio_config = {.radio_mode = ZB_RADIO_MODE_NATIVE},
+        .host_config = {.host_connection_mode = ZB_HOST_CONNECTION_MODE_NONE}
+    };
+    ESP_ERROR_CHECK(esp_zb_platform_config(&p_config));
+
+    // Enregistrement du signal handler Zigbee
+    // esp_zb_set_app_signal_handler(esp_zb_app_signal_handler); // Supprimé, non nécessaire
+
+    xTaskCreate(zigbee_task_runner, "zb_task", 4096, NULL, 5, NULL);
 }
