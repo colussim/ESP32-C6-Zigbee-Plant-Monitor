@@ -39,8 +39,10 @@ static uint8_t s_bat_pct_half = 0;   /* 0.5% units */
 static void make_zcl_string(uint8_t *dst, size_t dst_size, const char *src)
 {
     size_t len = strlen(src);
-    if (len > 254) len = 254;
-    if (len + 1 > dst_size) len = dst_size - 1;
+    if (len > 254) 
+        len = 254;
+    if (len + 1 > dst_size) 
+        len = dst_size - 1;
 
     dst[0] = (uint8_t)len;
     memcpy(&dst[1], src, len);
@@ -98,8 +100,10 @@ static int get_battery_mv(void)
 
 static uint8_t lipo_pct_from_mv(int vbat_mv)
 {
-    if (vbat_mv <= 3400) return 0;
-    if (vbat_mv >= 4200) return 100;
+    if (vbat_mv <= 3400) 
+        return 0;
+    if (vbat_mv >= 4200) 
+        return 100;
 
     int pct;
     if (vbat_mv < 3700) {
@@ -112,8 +116,10 @@ static uint8_t lipo_pct_from_mv(int vbat_mv)
         pct = 92 + (vbat_mv - 4100) * 8 / 100;
     }
 
-    if (pct < 0) pct = 0;
-    if (pct > 100) pct = 100;
+    if (pct < 0) 
+        pct = 0;
+    if (pct > 100) 
+        pct = 100;
     return (uint8_t)pct;
 }
 
@@ -168,8 +174,10 @@ static void read_sensors(int16_t *t, uint16_t *l, uint16_t *s)
 
         float ratio = (float)(VAL_AIR - adc_raw) / (float)(VAL_AIR - VAL_EAU);
         int perc = (int)(ratio * 10000.0f);
-        if (perc < 0) perc = 0;
-        if (perc > 10000) perc = 10000;
+        if (perc < 0) 
+            perc = 0;
+        if (perc > 10000) 
+            perc = 10000;
         *s = (uint16_t)perc;
 
         ESP_LOGI(TAG, "SOL RAW: %d | PERC: %.2f%%", adc_raw, (float)perc / 100.0f);
