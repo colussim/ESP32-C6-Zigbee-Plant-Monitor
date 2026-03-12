@@ -207,7 +207,7 @@ To allow Zigbee2MQTT to properly interpret your sensor data, you need to create 
 
 Create a new file called:
 ```bash
-sleepyPlantSensor.js
+sleepyPlantSensor.mjs
 ```
 
 Place it in the folder:
@@ -220,21 +220,22 @@ external_converters
 
 Below is an example converter for a DIY Zigbee soil sensor:
 ```js
-const fz = require('zigbee-herdsman-converters/converters/fromZigbee');
-const exposes = require('zigbee-herdsman-converters/lib/exposes');
-const e = exposes.presets;
+import * as m from 'zigbee-herdsman-converters/lib/modernExtend';
 
-module.exports = {
-    zigbeeModel: ['SoilSensor'], //ZigbeeModel
+export default {
+    fingerprint: [
+        {modelID: 'SoilSensor', manufacturerName: 'ECHOME'},
+    ],
+    zigbeeModel: ['SoilSensor'],
     model: 'SoilSensor',
     vendor: 'ECHOME',
     description: 'DIY Zigbee soil moisture sensor',
-    fromZigbee: [fz.humidity, fz.battery],
-    toZigbee: [],
-    exposes: [
-        e.humidity(),
-        e.battery(),
-        e.voltage(),
+    icon: 'device_icons/soilbeetle.png',
+    extend: [
+        m.battery(),
+        m.temperature(),
+        m.illuminance(),
+        m.humidity(),
     ],
 };
 ```
@@ -249,7 +250,7 @@ This file tells Zigbee2MQTT:
 Open the Zigbee2MQTT *configuration.yaml* file and add the following entry:
 ```yaml
 external_converters:
-  - external_converters/sleepyPlantSensor.js
+  - external_converters/sleepyPlantSensor.mjs
 ```
 Restart Zigbee2MQTT for the changes to take effect.
 
@@ -264,14 +265,6 @@ Add a PNG file inside the device_icons folder:
 device_icons/soilbeetle.png
 ```
 
-2️⃣ Configure the icon in configuration.yaml
-
-Locate your device entry and add the icon path:
-```yaml
-'0x9c9e6efffe771b64':
-    friendly_name: Sonde_int_Dracaena
-    icon: device_icons/soilbeetle.png
-```
 
 ✅ Result
 
