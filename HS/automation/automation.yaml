@@ -1,0 +1,19 @@
+- id: battery_low_plant_sensor_1
+  alias: Battery Probe plant low
+  description: Low battery alert for plant sensor
+  trigger:
+    - platform: numeric_state
+      entity_id: sensor.dracanena_battery
+      below: 20
+      for:
+        minutes: 5
+  condition: []
+  action:
+    - service: notify.whatsapp
+      data:
+        message: "🔋 Battery Probe plant 1 low (<20%) 🪫"
+    - service: notify.mobile_app_iphone_xxx
+      data:
+        title: "Plant sensor battery"
+        message: "The battery of plant probe 1 is below 20%"
+  mode: single
