@@ -275,7 +275,7 @@ After restarting Zigbee2MQTT:
 
 ---
 
-### Problem
+### 🐞 Problem
 
 While developing a custom Zigbee plant monitoring sensor using an ESP32-C6 and the ESP Zigbee SDK, sensor values were correctly measured and updated inside the device firmware, but Zigbee2MQTT did not update the values automatically.
 
@@ -299,7 +299,7 @@ Example MQTT payload after a manual refresh:
 
 ```
 
-**Root Cause**
+**🔍 Root Cause**
 
 The issue was caused by a missing Zigbee binding between the device clusters and the coordinator.
 
@@ -313,7 +313,7 @@ Without binding:
 
 This behavior made it appear as if the device was not reporting values.
 
-**Solution**
+**💡 Solution**
 
 The fix was to bind each reportable cluster to the Zigbee coordinator.
 
