@@ -1,3 +1,12 @@
+/*
+ *  Configuration for ESP32-C6 Zigbee Plant Monitor
+ *
+ *  This file defines all the configuration parameters for the ESP32-C6 Zigbee Plant Monitor project.
+ *  It includes pin assignments, I2C addresses, Zigbee settings, calibration values, and power management settings.
+ *
+*/
+
+
 #ifndef CONFIG_H
 #define CONFIG_H
 
@@ -34,7 +43,7 @@
  *  Battery measurement
  * -----------------------------------------------------------*/
 /* Adjust according to your multimeter if necessary */
-#define VBAT_DIVIDER                2.35f
+#define VBAT_DIVIDER                2.0f 
 
 /* -----------------------------------------------------------
  *  Soil moisture calibration
@@ -46,11 +55,12 @@
 /* -----------------------------------------------------------
  *  Power management
  * -----------------------------------------------------------*/
-/* Sensor: wake up every 1 hour */
-#define SLEEP_INTERVAL_US           (60ULL * 60ULL * 1000000ULL)
+/* Sensor: wake up every 2 hour */
+ #define SLEEP_INTERVAL_US           (120ULL * 60ULL * 1000000ULL)
+//#define SLEEP_INTERVAL_US (5ULL * 60ULL * 1000000ULL) 
 
 /* After publishing, allow time for the Zigbee stack to transmit before deep sleep */
-#define TX_GRACE_MS                 15000
+#define TX_GRACE_MS                 60000 //15000
 
 /* -----------------------------------------------------------
  *  Zigbee commissioning
@@ -68,6 +78,8 @@
 /* zigbeeModel and Vendor */
 #define ZB_MODEL_ID                 "SoilSensor"
 #define ZB_VENDOR_ID                "ECHOME"
+#define COORDINATOR_ADDR 0x0000
+#define COORDINATOR_EP   1
 
 /* -----------------------------------------------------------
  *  Events

@@ -275,6 +275,85 @@ After restarting Zigbee2MQTT:
 
 ---
 
+### Problem
+
+While developing a custom Zigbee plant monitoring sensor using an ESP32-C6 and the ESP Zigbee SDK, sensor values were correctly measured and updated inside the device firmware, but Zigbee2MQTT did not update the values automatically.
+
+The device only appeared to update when a manual refresh was triggered from the Zigbee2MQTT UI.
+
+Example behavior:
+	•	Sensor values were printed correctly in the device logs.
+	•	Zigbee2MQTT showed the correct value only after pressing “refresh”.
+	•	Automatic updates never occurred.
+
+Example MQTT payload after a manual refresh:
+```json
+
+{
+  "battery": 91,
+  "humidity": 0,
+  "illuminance": 4,
+  "linkquality": 160,
+  "temperature": 25.14
+}
+
+```
+
+**Root Cause**
+
+The issue was caused by a missing Zigbee binding between the device clusters and the coordinator.
+
+Even though attribute reporting was configured, the Zigbee stack had no destination for the reports, so no automatic updates were sent to the coordinator.
+
+Without binding:
+	•	Attributes were updated locally on the device
+	•	Zigbee reports were not delivered to the coordinator
+	•	Zigbee2MQTT therefore received no updates
+	•	The UI refresh triggered a manual read request (ZCL read), which temporarily returned the correct value.
+
+This behavior made it appear as if the device was not reporting values.
+
+**Solution**
+
+The fix was to bind each reportable cluster to the Zigbee coordinator.
+
+Example clusters used in the sensor:
+	•	Temperature Measurement
+	•	Illuminance Measurement
+	•	Relative Humidity Measurement
+	•	Power Configuration (battery)
+
+Binding must be performed after the device successfully joins the network.
+
+Example binding logic:
+```c
+bind_cluster_to_coordinator(ESP_ZB_ZCL_CLUSTER_ID_TEMP_MEASUREMENT);
+bind_cluster_to_coordinator(ESP_ZB_ZCL_CLUSTER_ID_ILLUMINANCE_MEASUREMENT);
+bind_cluster_to_coordinator(ESP_ZB_ZCL_CLUSTER_ID_REL_HUMIDITY_MEASUREMENT);
+bind_cluster_to_coordinator(ESP_ZB_ZCL_CLUSTER_ID_POWER_CONFIG);
+```
+Once the clusters are bound to the coordinator, attribute reports are correctly delivered and Zigbee2MQTT updates automatically.
+
+Example Zigbee2MQTT log after the fix:
+```txt
+z2m:mqtt: MQTT publish: topic 'zigbee2mqtt/Dracaena',
+payload '{"battery":91,"humidity":0,"illuminance":4,"linkquality":160,"temperature":25.14}'
+```
+
+**Key Takeaway**
+
+When using the ESP Zigbee SDK, configuring attribute reporting alone is not sufficient.
+
+A proper APS binding to the coordinator is required for automatic attribute reporting to work correctly.
+
+Without this binding:
+	•	Reports have no destination
+	•	Zigbee2MQTT will not receive updates
+	•	Values will only appear to update when manually queried.
+
+
+---
+
 ## 🔚 Conclusion
 
 This project demonstrates how to build a DIY Zigbee plant monitoring sensor using an ESP32-C6 and integrate it into Home Assistant.  
