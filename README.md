@@ -31,6 +31,11 @@ The components used in this project were mainly parts already available in my st
 > **Custom PCB:** A small custom PCB for the ESP32-C6 and sensor connectors
 >
 > **Enclosure:** 3D-printed case designed to fit all components
+---
+
+![schema](imgs/schema_plant_monitor.png)
+
+---
 
 ## ✨ Features
 
@@ -77,7 +82,7 @@ A custom 3D-printed case is provided to house the ESP32-C6, PCB, and all sensors
 - [x] Soil moisture monitoring (main branch)
 - [x] Soil temperature integration (upcoming branch)
 - [x] Light exposure integration (upcoming branch)
-- [ ] Improved Home Assistant dashboard
+- [x] Improved Home Assistant dashboard
 
 ---
 
@@ -275,6 +280,96 @@ After restarting Zigbee2MQTT:
 
 ---
 
+## ⚡ Power Management Considerations
+
+Battery-powered Zigbee devices typically use sleep mechanisms to reduce power consumption.  
+Two approaches were evaluated during development: **Deep Sleep** and **Light Sleep (Sleepy End Device)**.
+
+Although deep sleep would significantly reduce power consumption, it was not reliable with the ESP Zigbee SDK.
+
+## 😴 Why Deep Sleep Is Not Used
+
+The ESP32-C6 Zigbee stack currently does not handle deep sleep well for Zigbee end devices.
+
+When the device enters deep sleep:
+
+• the Zigbee stack is completely stopped  
+• the device loses its active network session  
+• the Zigbee connection must be restored after every wake-up  
+
+In practice this causes several issues:
+
+• slow reconnection times  
+• unreliable attribute reporting  
+• missed Zigbee messages  
+• inconsistent behavior in Zigbee2MQTT
+
+Because of this limitation, the sensor uses **Light Sleep instead of Deep Sleep**.
+
+## 🔋 Current Power Strategy
+
+The firmware implements a **Sleepy End Device cycle**:
+
+1. Wake up
+2. Read sensors
+3. Publish Zigbee attribute reports
+4. Wait `TX_GRACE_MS` to ensure radio transmission
+5. Enter light sleep
+6. Wake up after `SLEEP_INTERVAL_US`
+
+Example configuration:
+```c
+
+#define SLEEP_INTERVAL_US           (120ULL * 60ULL * 1000000ULL)
+#define TX_GRACE_MS                 5000 //15s
+
+```
+This approach keeps the Zigbee session active while still allowing the device to remain in a low-power state for most of the time.
+
+## ⚡ Power Optimization with MOSFET (Soil Sensor Control)
+
+To reduce power consumption and extend battery life, the soil moisture sensor (DFRobot SEN0308) is not powered continuously.
+
+Instead, a P-channel MOSFET (BS250) is used to switch the sensor’s power supply on demand.
+
+The ESP32-C6 controls the MOSFET through a GPIO:
+	•	GPIO LOW → MOSFET ON → sensor powered
+	•	GPIO HIGH → MOSFET OFF → sensor disconnected
+
+This approach allows the sensor to be powered only during measurement cycles:
+	1.	Enable power via MOSFET
+	2.	Wait ~300 ms for stabilization
+	3.	Read ADC value
+	4.	Cut power
+
+This significantly reduces idle current consumption, as the SEN0308 sensor draws current continuously when powered.
+
+---
+
+## 🔄 Device Operation Cycle
+
+```mermaid
+flowchart TD
+
+    A[Wake up ESP32-C6] --> B[Initialize Zigbee stack]
+    B --> C[Read sensors\nTemperature / Soil moisture / Light]
+    C --> D[Measure battery voltage]
+    D --> E[Update Zigbee attributes]
+
+    E --> F[Publish Zigbee reports]
+    F --> G[Wait TX_GRACE_MS\n5 seconds]
+
+    G --> H[Enter Light Sleep]
+
+    H --> I[RTC Timer running\nSLEEP_INTERVAL_US = 2 hours]
+
+    I --> J[Timer wakeup]
+    J --> A
+```
+
+
+---
+
 ### 🐞 Problem
 
 While developing a custom Zigbee plant monitoring sensor using an ESP32-C6 and the ESP Zigbee SDK, sensor values were correctly measured and updated inside the device firmware, but Zigbee2MQTT did not update the values automatically.
@@ -352,6 +447,7 @@ Without this binding:
 	•	Values will only appear to update when manually queried.
 
 
+
 ---
 
 ## 🔚 Conclusion
@@ -361,7 +457,23 @@ It allows you to monitor soil moisture, temperature, humidity, and light exposur
 
 Feel free to adapt the hardware, improve the firmware, or customize the Home Assistant dashboard for your own setup.
 
-Contributions are welcome — feel free to open issues or submit pull requests for improvements!
+---
+
+## 🚀 Next Steps
+
+The next step for this project is to move toward a more integrated Zigbee device instead of relying on a general-purpose ESP32-C6 board.
+
+While the ESP32-C6 is extremely powerful and flexible, it also introduces several constraints for low-power Zigbee sensors, such as power management complexity, sleep handling, and stack limitations.
+
+A dedicated Zigbee SoC or module would allow a more optimized hardware design, lower power consumption, and a cleaner integration as a true Zigbee end device.
+
+That said, this project has been a very valuable exercise for understanding how the Zigbee stack works on the ESP32-C6, including:
+- Zigbee cluster configuration
+- attribute reporting and binding
+- sleepy end device behavior
+- integration with Zigbee2MQTT and Home Assistant
+
+It provided a solid foundation for future Zigbee-based IoT projects.
 
 ---
 
@@ -374,5 +486,5 @@ The environmental thresholds used in this project are inspired by several indoor
 
 - [Indoor Plant Care](https://www.purdue.edu/hla/sites/yardandgarden/wp-content/uploads/sites/2/2016/10/HO-39.pdf)
 - [Light and Moisture Requirements for Indoor Plants](https://sustainablecampus.unimelb.edu.au/__data/assets/pdf_file/0005/2839190/Indoor-plant-workshop-Light-and-Moisture-Requirements.pdf)
-[IoT Solution for Winter Survival of Indoor Plants](https://arxiv.org/abs/2106.05130)
+- [IoT Solution for Winter Survival of Indoor Plants](https://arxiv.org/abs/2106.05130)
 - [Basic Houseplant Care Guide](tagawagardens.com/wp-content/uploads/2022/03/Indoor_Plant_Care.pdf)
