@@ -43,24 +43,28 @@
  *  Battery measurement
  * -----------------------------------------------------------*/
 /* Adjust according to your multimeter if necessary */
-#define VBAT_DIVIDER                2.0f 
+#define VBAT_DIVIDER                2.185f 
 
 /* -----------------------------------------------------------
- *  Soil moisture calibration
+ *  Soil moisture calibration and Power
  * -----------------------------------------------------------*/
 /* Calibrated values for your setup */
 #define VAL_AIR                     3056
 #define VAL_EAU                     298
+#define SOIL_PWR_GPIO               GPIO_NUM_7
 
 /* -----------------------------------------------------------
- *  Power management
+ *  Power management (Light Sleep SED)
  * -----------------------------------------------------------*/
-/* Sensor: wake up every 2 hour */
- #define SLEEP_INTERVAL_US           (120ULL * 60ULL * 1000000ULL)
-//#define SLEEP_INTERVAL_US (5ULL * 60ULL * 1000000ULL) 
+/* Measurement interval in milliseconds (2 hours) */
+#define MEASURE_INTERVAL_MS         (120UL * 60UL * 1000UL)
+//#define MEASURE_INTERVAL_MS       (5UL * 60UL * 1000UL)
 
-/* After publishing, allow time for the Zigbee stack to transmit before deep sleep */
-#define TX_GRACE_MS                 60000 //15000
+/* After publishing, allow time for the Zigbee stack to transmit */
+#define TX_GRACE_MS                 5000
+
+/* Zigbee Sleepy End Device poll interval (in ms, quarter-seconds) */
+#define SED_POLL_INTERVAL_MS        3000
 
 /* -----------------------------------------------------------
  *  Zigbee commissioning
