@@ -60,12 +60,6 @@ This makes it easy to track plant conditions and adjust watering schedules direc
 > The Plant Card Lovelace card is installed via HACS.
 
 
-## 🌿 Repository Structure & Branches
-
-- The **main** branch currently supports only soil moisture measurement.
-- Integration of soil temperature and light exposure is planned for future branches.
-- Hardware design files (PCB and 3D enclosure) are included for easy reproduction.
-
 ## 🚀 Getting Started
 
 1. Flash the firmware to the Beetle ESP32-C6 Mini.
@@ -488,3 +482,4 @@ The environmental thresholds used in this project are inspired by several indoor
 - [Light and Moisture Requirements for Indoor Plants](https://sustainablecampus.unimelb.edu.au/__data/assets/pdf_file/0005/2839190/Indoor-plant-workshop-Light-and-Moisture-Requirements.pdf)
 - [IoT Solution for Winter Survival of Indoor Plants](https://arxiv.org/abs/2106.05130)
 - [Basic Houseplant Care Guide](tagawagardens.com/wp-content/uploads/2022/03/Indoor_Plant_Care.pdf)
+- [Paired end device can occasionally not connect coordinator](https://github.com/espressif/esp-zigbee-sdk/issues/465?utm_source=chatgpt.com)

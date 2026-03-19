@@ -12,7 +12,6 @@
 
 #include "esp_log.h"
 #include "esp_check.h"
-#include "esp_sleep.h"
 #include "nvs_flash.h"
 
 #include "driver/i2c_master.h"
@@ -22,6 +21,8 @@
 
 #include "esp_zigbee_core.h"
 #include "zdo/esp_zigbee_zdo_common.h"
+
+#include "driver/gpio.h"
 
 #include "config.h"
 
@@ -55,48 +56,33 @@ static void make_zcl_string(uint8_t *dst, size_t dst_size, const char *src)
     memcpy(&dst[1], src, len);
 }
 
-static void setup_reporting(uint16_t cluster_id, uint16_t attr_id, uint8_t endpoint, uint16_t attr_type)
+
+static void soil_power_init(void)
 {
-    esp_zb_zcl_reporting_info_t reporting_info = {0};
-
-    reporting_info.direction = ESP_ZB_ZCL_CMD_DIRECTION_TO_SRV;
-    reporting_info.ep = endpoint;
-    reporting_info.cluster_id = cluster_id;
-    reporting_info.cluster_role = ESP_ZB_ZCL_CLUSTER_SERVER_ROLE;
-    reporting_info.attr_id = attr_id;
-    reporting_info.dst.profile_id = ESP_ZB_AF_HA_PROFILE_ID;
-    reporting_info.manuf_code = ESP_ZB_ZCL_ATTR_NON_MANUFACTURER_SPECIFIC;
-
-    reporting_info.u.send_info.min_interval = 1;
-    reporting_info.u.send_info.max_interval = 300;
-    reporting_info.u.send_info.def_min_interval = 1;
-    reporting_info.u.send_info.def_max_interval = 300;
-
-    switch (attr_type) {
-        case ESP_ZB_ZCL_ATTR_TYPE_S16:
-            reporting_info.u.send_info.delta.s16 = 1;
-            break;
-        case ESP_ZB_ZCL_ATTR_TYPE_U8:
-            reporting_info.u.send_info.delta.u8 = 1;
-            break;
-        case ESP_ZB_ZCL_ATTR_TYPE_U16:
-        default:
-            reporting_info.u.send_info.delta.u16 = 1;
-            break;
-    }
-
-    esp_zb_zcl_update_reporting_info(&reporting_info);
-
-    esp_zb_zcl_attr_location_info_t attr_info = {
-        .endpoint_id = endpoint,
-        .cluster_id = cluster_id,
-        .cluster_role = ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
-        .attr_id = attr_id,
+    gpio_config_t io_conf = {
+        .pin_bit_mask = (1ULL << SOIL_PWR_GPIO),
+        .mode = GPIO_MODE_INPUT_OUTPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
     };
 
-    esp_err_t err = esp_zb_zcl_start_attr_reporting(attr_info);
-    ESP_LOGI(TAG, "Reporting setup cluster=0x%04X attr=0x%04X -> %s",
-             cluster_id, attr_id, esp_err_to_name(err));
+    ESP_ERROR_CHECK(gpio_config(&io_conf));
+
+    /* P-MOSFET OFF by default */
+    ESP_ERROR_CHECK(gpio_set_level(SOIL_PWR_GPIO, 1));
+}
+
+static void soil_power_on(void)
+{
+   ESP_ERROR_CHECK(gpio_set_level(SOIL_PWR_GPIO, 0));
+   ESP_LOGI(TAG, "soil_power_on -> gpio=%d", gpio_get_level(SOIL_PWR_GPIO));
+}
+
+static void soil_power_off(void)
+{
+    ESP_ERROR_CHECK(gpio_set_level(SOIL_PWR_GPIO, 1));
+    ESP_LOGI(TAG, "soil_power_off -> gpio=%d", gpio_get_level(SOIL_PWR_GPIO));
 }
 
 static void report_attr(uint16_t cluster_id, uint16_t attr_id)
@@ -200,42 +186,67 @@ static void battery_adc_init(void)
 
 static int get_battery_mv(void)
 {
-    int raw = 0;
-    ESP_ERROR_CHECK(adc_oneshot_read(adc1_handle, VBAT_ADC_CHAN, &raw));
+    /* Read multiple samples with delay, then take the median to reject outliers */
+    const int samples = 16;
+    int readings[16];
+
+    for (int i = 0; i < samples; i++) {
+        adc_oneshot_read(adc1_handle, VBAT_ADC_CHAN, &readings[i]);
+        vTaskDelay(pdMS_TO_TICKS(5));
+    }
+
+    /* Simple insertion sort for median */
+    for (int i = 1; i < samples; i++) {
+        int key = readings[i];
+        int j = i - 1;
+        while (j >= 0 && readings[j] > key) {
+            readings[j + 1] = readings[j];
+            j--;
+        }
+        readings[j + 1] = key;
+    }
+
+    /* Take median of central 8 values to reject outliers */
+    int sum = 0;
+    for (int i = 4; i < 12; i++) {
+        sum += readings[i];
+    }
+    int raw = sum / 8;
 
     int mv_adc = 0;
     if (adc_cali_enabled) {
-        ESP_ERROR_CHECK(adc_cali_raw_to_voltage(adc_cali_handle, raw, &mv_adc));
+        adc_cali_raw_to_voltage(adc_cali_handle, raw, &mv_adc);
     } else {
         mv_adc = (raw * 3300) / 4095;
     }
 
     int vbat_mv = (int)(mv_adc * VBAT_DIVIDER);
-    ESP_LOGI(TAG, "BAT: raw=%d mv_adc=%d vbat=%d", raw, mv_adc, vbat_mv);
+
+    ESP_LOGI(TAG, "BAT: raw=%d mv_adc=%d vbat=%dmV (divider=%.3f)",
+             raw, mv_adc, vbat_mv, (double)VBAT_DIVIDER);
     return vbat_mv;
 }
 
+
 static uint8_t lipo_pct_from_mv(int vbat_mv)
 {
-    int pct;
-   if (vbat_mv <= 3400) {
-        pct = 0;
-    } else if (vbat_mv < 3600) {
-        pct = (vbat_mv - 3400) * 20 / 200;   // 0 -> 20%
-    } else if (vbat_mv < 3700) {
-        pct = 20 + (vbat_mv - 3600) * 20 / 100;  // 20 -> 40%
-    } else if (vbat_mv < 3900) {
-        pct = 40 + (vbat_mv - 3700) * 25 / 200;  // 40 -> 65%
-    } else if (vbat_mv < 4100) {
-        pct = 65 + (vbat_mv - 3900) * 20 / 200;  // 65 -> 85%
-    } else {
-        pct = 85 + (vbat_mv - 4100) * 15 / 100;  // 85 -> 100%
-    }
+    if (vbat_mv >= 4150) return 100;
+    if (vbat_mv <= 3300) return 0;
 
-    if (pct < 0) 
-        pct = 0;
-    if (pct > 100) 
-        pct = 100;
+    int pct;
+    if (vbat_mv > 4000) {
+        // 4000mV -> 4150mV : 85% -> 100%
+        pct = 85 + (vbat_mv - 4000) * 15 / 150;
+    } else if (vbat_mv > 3800) {
+        // 3800mV -> 4000mV : 60% -> 85%
+        pct = 60 + (vbat_mv - 3800) * 25 / 200;
+    } else if (vbat_mv > 3600) {
+        // 3600mV -> 3800mV : 20% -> 60%
+        pct = 20 + (vbat_mv - 3600) * 40 / 200;
+    } else {
+        // 3300mV -> 3600mV : 0% -> 20%
+        pct = (vbat_mv - 3300) * 20 / 300;
+    }
     return (uint8_t)pct;
 }
 
@@ -287,24 +298,65 @@ static void read_sensors(int16_t *t, uint16_t *l, uint16_t *s)
 
     /* Soil ADC */
     int adc_raw = 0;
-    if (adc_oneshot_read(adc1_handle, SOIL_ADC_CHAN, &adc_raw) == ESP_OK) {
-        float ratio = (float)(VAL_AIR - adc_raw) / (float)(VAL_AIR - VAL_EAU);
-        int perc = (int)(ratio * 10000.0f);
-        if (perc < 0) {
-            perc = 0;
-        }
-        if (perc > 10000) {
-            perc = 10000;
-        }
-        *s = (uint16_t)perc;
-        ESP_LOGI(TAG, "SOL RAW: %d | PERC: %.2f%%", adc_raw, (float)perc / 100.0f);
+    int sum = 0;
+    int valid_samples = 0;
+    int samples = 5;
+    /* Power soil probe */
+    ESP_LOGI(TAG, "SOIL_PWR_GPIO level before ON: %d", gpio_get_level(SOIL_PWR_GPIO));
+    soil_power_on();
+    vTaskDelay(pdMS_TO_TICKS(2000));
+    ESP_LOGI(TAG, "SOIL_PWR_GPIO level after ON: %d", gpio_get_level(SOIL_PWR_GPIO));   
+    /* waiting for the probe to stabilize */
+    vTaskDelay(pdMS_TO_TICKS(300));
+
+    for (int i = 0; i < samples; i++) {
+    int raw = 0;
+
+    if (adc_oneshot_read(adc1_handle, SOIL_ADC_CHAN, &raw) == ESP_OK) {
+        sum += raw;
+        valid_samples++;
     } else {
-        *s = 0;
-        ESP_LOGW(TAG, "ADC soil read failed");
+        ESP_LOGW(TAG, "ADC soil read failed on sample %d", i + 1);
     }
+
+    vTaskDelay(pdMS_TO_TICKS(10));
+}
+
+if (valid_samples > 0) {
+    adc_raw = sum / valid_samples;
+
+    float ratio = (float)(VAL_AIR - adc_raw) / (float)(VAL_AIR - VAL_EAU);
+    int perc = (int)(ratio * 10000.0f);
+
+    if (perc < 0) {
+        perc = 0;
+    }
+    if (perc > 10000) {
+        perc = 10000;
+    }
+
+    *s = (uint16_t)perc;
+
+    ESP_LOGI(TAG, "SOL RAW AVG: %d | PERC: %.2f%% (%d/%d samples)",
+             adc_raw, (float)perc / 100.0f, valid_samples, samples);
+} else {
+    *s = 0;
+    ESP_LOGW(TAG, "ADC soil read failed: no valid samples");
+}
+    /* Power off soil probe */
+    vTaskDelay(pdMS_TO_TICKS(20));
+    soil_power_off();
+    vTaskDelay(pdMS_TO_TICKS(2000));
+    ESP_LOGI(TAG, "SOIL_PWR_GPIO level after OFF: %d", gpio_get_level(SOIL_PWR_GPIO));
 }
 
 /* -------------------- ZIGBEE -------------------- */
+static void bdb_start_top_level_commissioning_cb(uint8_t mode_mask)
+{
+    ESP_LOGI(TAG, "Commissioning callback, mode=0x%02x", mode_mask);
+    esp_zb_bdb_start_top_level_commissioning(mode_mask);
+}
+
 void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
 {
     uint32_t *p_sg_p = signal_struct->p_app_signal;
@@ -318,60 +370,40 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
 
     switch (sig_type) {
         case ESP_ZB_ZDO_SIGNAL_SKIP_STARTUP:
-            ESP_LOGI(TAG, "Skip startup -> stack ready, start steering");
-            xEventGroupSetBits(s_app_events, EVT_ZB_READY);
-            esp_zb_bdb_start_top_level_commissioning(ESP_ZB_BDB_MODE_NETWORK_STEERING);
+            ESP_LOGI(TAG, "Zigbee stack initialized");
+            esp_zb_bdb_start_top_level_commissioning(ESP_ZB_BDB_MODE_INITIALIZATION);
             break;
 
-#ifdef ESP_ZB_BDB_SIGNAL_DEVICE_FIRST_START
         case ESP_ZB_BDB_SIGNAL_DEVICE_FIRST_START:
-            xEventGroupSetBits(s_app_events, EVT_ZB_READY);
-            if (status == ESP_OK) {
-                if (esp_zb_bdb_dev_joined()) {
-                    ESP_LOGI(TAG, "First start OK and joined");
-                    xEventGroupSetBits(s_app_events, EVT_ZB_JOINED);
-                } else {
-                    ESP_LOGI(TAG, "First start OK -> start steering");
-                    esp_zb_bdb_start_top_level_commissioning(ESP_ZB_BDB_MODE_NETWORK_STEERING);
-                }
-            } else {
-                ESP_LOGW(TAG, "First start failed -> retry steering");
-                esp_zb_bdb_start_top_level_commissioning(ESP_ZB_BDB_MODE_NETWORK_STEERING);
-            }
-            break;
-#endif
-
-#ifdef ESP_ZB_BDB_SIGNAL_DEVICE_REBOOT
         case ESP_ZB_BDB_SIGNAL_DEVICE_REBOOT:
             xEventGroupSetBits(s_app_events, EVT_ZB_READY);
-            if (status == ESP_OK && esp_zb_bdb_dev_joined()) {
-                ESP_LOGI(TAG, "Device restored and joined network");
-                xEventGroupSetBits(s_app_events, EVT_ZB_JOINED);
-            } else {
-                ESP_LOGW(TAG, "Device reboot restore failed -> start steering");
+            if (status == ESP_OK) {
+                ESP_LOGI(TAG, "Start network steering");
                 esp_zb_bdb_start_top_level_commissioning(ESP_ZB_BDB_MODE_NETWORK_STEERING);
+            } else {
+                ESP_LOGW(TAG, "Failed to init Zigbee (status: %s) -> factory reset", esp_err_to_name(status));
+                esp_zb_factory_reset();
             }
             break;
-#endif
 
-#ifdef ESP_ZB_BDB_SIGNAL_STEERING
         case ESP_ZB_BDB_SIGNAL_STEERING:
             if (status == ESP_OK) {
-                ESP_LOGI(TAG, "Network steering success");
+                ESP_LOGI(TAG, "Joined network successfully");
                 xEventGroupSetBits(s_app_events, EVT_ZB_JOINED);
             } else {
-                ESP_LOGW(TAG, "Network steering failed");
+                ESP_LOGW(TAG, "Network steering failed (status: %s), retry in 1s", esp_err_to_name(status));
+                esp_zb_scheduler_alarm(bdb_start_top_level_commissioning_cb,
+                                       ESP_ZB_BDB_MODE_NETWORK_STEERING, 1000);
             }
             break;
-#endif
 
         default:
-            if (esp_zb_bdb_dev_joined()) {
-                xEventGroupSetBits(s_app_events, EVT_ZB_JOINED);
-            }
+            ESP_LOGI(TAG, "ZDO signal: %s (0x%x), status: %s",
+                     esp_zb_zdo_signal_to_string(sig_type), sig_type, esp_err_to_name(status));
             break;
     }
 }
+
 
 static void zigbee_task_runner(void *pvParameters)
 {
@@ -448,33 +480,11 @@ static void zigbee_task_runner(void *pvParameters)
     esp_zb_ep_list_add_ep(ep_list, cluster_list, ep_config);
     esp_zb_device_register(ep_list);
 
-    setup_reporting(ESP_ZB_ZCL_CLUSTER_ID_TEMP_MEASUREMENT,
-                    ESP_ZB_ZCL_ATTR_TEMP_MEASUREMENT_VALUE_ID,
-                    ENDPOINT_ID,
-                    ESP_ZB_ZCL_ATTR_TYPE_S16);
-    setup_reporting(ESP_ZB_ZCL_CLUSTER_ID_ILLUMINANCE_MEASUREMENT,
-                    ESP_ZB_ZCL_ATTR_ILLUMINANCE_MEASUREMENT_MEASURED_VALUE_ID,
-                    ENDPOINT_ID,
-                    ESP_ZB_ZCL_ATTR_TYPE_U16);
-    setup_reporting(ESP_ZB_ZCL_CLUSTER_ID_REL_HUMIDITY_MEASUREMENT,
-                    ESP_ZB_ZCL_ATTR_REL_HUMIDITY_MEASUREMENT_VALUE_ID,
-                    ENDPOINT_ID,
-                    ESP_ZB_ZCL_ATTR_TYPE_U16);
-    setup_reporting(ESP_ZB_ZCL_CLUSTER_ID_POWER_CONFIG,
-                    0x0020,
-                    ENDPOINT_ID,
-                    ESP_ZB_ZCL_ATTR_TYPE_U8);
-    setup_reporting(ESP_ZB_ZCL_CLUSTER_ID_POWER_CONFIG,
-                    0x0021,
-                    ENDPOINT_ID,
-                    ESP_ZB_ZCL_ATTR_TYPE_U8);
-
     esp_zb_set_primary_network_channel_set(ESP_ZB_TRANSCEIVER_ALL_CHANNELS_MASK);
 
     ESP_ERROR_CHECK(esp_zb_start(false));
     ESP_LOGI(TAG, "Zigbee stack started, entering main loop");
 
-    xEventGroupSetBits(s_app_events, EVT_ZB_READY);
     esp_zb_stack_main_loop();
 }
 
@@ -594,13 +604,8 @@ static void sensor_cycle_task(void *pvParameters)
         ESP_LOGI(TAG, "Keeping radio awake for %d ms to let Zigbee transmit", TX_GRACE_MS);
         vTaskDelay(pdMS_TO_TICKS(TX_GRACE_MS));
 
-        uint64_t interval_ms = SLEEP_INTERVAL_US / 1000ULL;
-        if (interval_ms < TX_GRACE_MS) {
-            interval_ms = TX_GRACE_MS + 1000ULL;
-        }
-
-        ESP_LOGI(TAG, "Waiting %llu ms before next measurement", interval_ms);
-        vTaskDelay(pdMS_TO_TICKS((uint32_t)interval_ms));
+        ESP_LOGI(TAG, "Sleeping for %lu ms", (unsigned long)MEASURE_INTERVAL_MS);
+        vTaskDelay(pdMS_TO_TICKS(MEASURE_INTERVAL_MS));
     }
 }
 
@@ -616,9 +621,6 @@ void app_main(void)
 
     s_app_events = xEventGroupCreate();
     assert(s_app_events != NULL);
-
-    esp_sleep_wakeup_cause_t wake_cause = esp_sleep_get_wakeup_cause();
-    ESP_LOGI(TAG, "Wake cause: %d", (int)wake_cause);
 
     i2c_master_bus_handle_t bus_h;
     i2c_master_bus_config_t b_cfg = {
@@ -642,6 +644,7 @@ void app_main(void)
     ESP_ERROR_CHECK(i2c_master_bus_add_device(bus_h, &d_cfg, &lux_handle));
 
     battery_adc_init();
+    soil_power_init();
 
     esp_zb_platform_config_t p_config = {
         .radio_config = {.radio_mode = ZB_RADIO_MODE_NATIVE},
