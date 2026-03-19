@@ -37,13 +37,6 @@ The components used in this project were mainly parts already available in my st
 
 ---
 
-## ✨ Features
-
-- Zigbee communication for easy integration with smart home systems
-- Real-time monitoring of plant health parameters
-- Designed for indoor plant care and irrigation tracking
-- Data visualization and dashboard in Home Assistant
-
 ## 🏠 Home Assistant Integration
 
 The sensor data is sent via Zigbee and can be visualized in **Home Assistant** using a dedicated plant monitoring card.
