@@ -2,4 +2,4 @@ build
 scripts
 sonar-scan.sh
 sonar-project.properties
-
+.DS_Store
