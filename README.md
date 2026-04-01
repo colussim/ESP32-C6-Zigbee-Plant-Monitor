@@ -85,7 +85,7 @@ cd esp-idf
 git fetch --tags
 git checkout v5.4.1
 git submodule update --init --recursive
-./install.sh esp32s3
+./install.sh esp32c6
 . ./export.sh
 
 idf.py --version
